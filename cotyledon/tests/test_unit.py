@@ -97,3 +97,56 @@ class SomeTest(TestCase):
         with pytest.raises(exc) as exc_info:
             func(*args, **kwargs)
         assert msg == str(exc_info.value)
+
+
+class TestOsloConfigGlue(TestCase):
+    """Test oslo_config_glue functionality."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        cotyledon.ServiceManager._process_runner_already_created = False
+
+    def test_setup_with_duplicate_options(self) -> None:
+        """Test that setup handles duplicate options gracefully."""
+        from oslo_config import cfg  # noqa: PLC0415
+
+        from cotyledon import oslo_config_glue  # noqa: PLC0415
+
+        # Create a config object
+        conf = cfg.ConfigOpts()
+
+        # Register options first time
+        conf.register_opts(oslo_config_glue.service_opts)
+
+        # Create a service manager
+        sm = cotyledon.ServiceManager()
+
+        # Setup should not raise DuplicateOptError
+        # This simulates the scenario where options are already registered
+        # (e.g., in test environments)
+        oslo_config_glue.setup(sm, conf)
+
+        # Check that all options exist
+        for opt in oslo_config_glue.service_opts:
+            conf._get(opt.name)
+
+        # Verify that the service manager was configured
+        self.assertEqual(sm._graceful_shutdown_timeout, 60)
+
+    def test_setup_partial_registration(self) -> None:
+        """Test that setup handles partial option registration correctly."""
+        from oslo_config import cfg  # noqa: PLC0415
+
+        from cotyledon import oslo_config_glue  # noqa: PLC0415
+
+        conf = cfg.ConfigOpts()
+
+        # Register only one option manually
+        conf.register_opt(oslo_config_glue.service_opts[0])
+
+        sm = cotyledon.ServiceManager()
+        oslo_config_glue.setup(sm, conf)
+
+        # All options should now be available
+        for opt in oslo_config_glue.service_opts:
+            conf._get(opt.name)

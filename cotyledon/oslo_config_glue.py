@@ -119,7 +119,18 @@ def setup(
     :param reload_method: reload or mutate the config files
     :type reload_method: str "reload/mutate"
     """
-    conf.register_opts(service_opts)
+    # Register only missing options
+    opts_to_register = []
+    for opt in service_opts:
+        try:
+            conf._get(opt.name)
+            # Already registered
+            continue
+        except cfg.NoSuchOptError:
+            opts_to_register.append(opt)
+
+    if opts_to_register:
+        conf.register_opts(opts_to_register)
 
     # Set cotyledon options from oslo config options
     _load_service_manager_options(service_manager, conf)
