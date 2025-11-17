@@ -121,11 +121,28 @@ class ServiceManager(_utils.SignalManager):
         self,
         wait_interval: float = 0.01,
         graceful_shutdown_timeout: int = 60,
+        mp_context: multiprocessing.context.BaseContext | None = None,
     ) -> None:
         """Creates the ServiceManager object
 
         :param wait_interval: time between each new process spawn
         :type wait_interval: float
+        :param graceful_shutdown_timeout: timeout for graceful shutdown
+        :type graceful_shutdown_timeout: int
+        :param mp_context: multiprocessing context to use (defaults to 'fork')
+        :type mp_context: multiprocessing.context.BaseContext | None
+
+        By default, workers are spawned using the 'fork' start method.
+        To use a different start method (e.g., 'spawn' for macOS compatibility),
+        pass the context via the mp_context parameter.
+
+        Example::
+
+            import multiprocessing
+            # Use 'spawn' start method (useful on macOS)
+            manager = ServiceManager(mp_context=multiprocessing.get_context('spawn'))
+            manager.add(MyService, workers=5)
+            manager.run()
 
         """
 
@@ -171,7 +188,12 @@ class ServiceManager(_utils.SignalManager):
         with contextlib.suppress(OSError, AttributeError):
             os.setsid()
 
-        self._death_detection_pipe = multiprocessing.Pipe(duplex=False)
+        # Default to multiprocessing (fork-compatible) if not provided
+        self.mp_context: multiprocessing.context.BaseContext = (
+            mp_context or multiprocessing
+        )
+
+        self._death_detection_pipe = self.mp_context.Pipe(duplex=False)
 
         if os.name == "posix":
             signal.signal(signal.SIGCHLD, self._signal_catcher)
@@ -216,6 +238,43 @@ class ServiceManager(_utils.SignalManager):
         if on_dead_worker is not None:
             _utils.check_callable(on_dead_worker, "on_dead_worker")
             self._hooks["dead_worker"].append(on_dead_worker)
+
+    def set_multiprocessing_context(
+        self,
+        ctx: multiprocessing.context.BaseContext,
+    ) -> None:
+        """Set the multiprocessing context for spawning workers
+
+        :param ctx: The multiprocessing context to use (e.g., multiprocessing.get_context('spawn'))
+        :type ctx: multiprocessing.context.BaseContext
+
+        This must be called before :py:meth:`run` is called.
+
+        .. note::
+            It is recommended to pass the context via the :py:meth:`__init__`
+            parameter ``mp_context`` instead of using this method.
+
+        Example::
+
+            import multiprocessing
+            manager = ServiceManager()
+            manager.set_multiprocessing_context(multiprocessing.get_context('spawn'))
+            manager.add(MyService, workers=5)
+            manager.run()
+
+        Alternatively, you can pass the context to the constructor::
+
+            import multiprocessing
+            manager = ServiceManager(mp_context=multiprocessing.get_context('spawn'))
+            manager.add(MyService, workers=5)
+            manager.run()
+        """
+        if self._child_supervisor is not None:
+            msg = "Cannot change multiprocessing context after run() has been called"
+            raise RuntimeError(msg)
+        self.mp_context = ctx
+        # Recreate the death detection pipe with the new context
+        self._death_detection_pipe = self.mp_context.Pipe(duplex=False)
 
     @typing.overload
     def _run_hooks(
@@ -318,7 +377,10 @@ class ServiceManager(_utils.SignalManager):
         """
 
         self._systemd_notify_once()
-        self._child_supervisor = _utils.spawn(self._child_supervisor_thread)
+        self._child_supervisor = _utils.spawn(
+            self._child_supervisor_thread,
+            ctx=self.mp_context,
+        )
         self._wait_forever()
 
     def _child_supervisor_thread(self) -> None:
@@ -508,7 +570,7 @@ class ServiceManager(_utils.SignalManager):
     def _start_worker(self, service_id: t.ServiceId, worker_id: t.WorkerId) -> None:
         self._slowdown_respawn_if_needed()
 
-        started_event = multiprocessing.Event()
+        started_event = self.mp_context.Event()
 
         # Create and run a new service
         p = _utils.spawn_process(
@@ -520,6 +582,7 @@ class ServiceManager(_utils.SignalManager):
             self._death_detection_pipe,
             self._hooks["new_worker"],
             self._graceful_shutdown_timeout,
+            ctx=self.mp_context,
         )
 
         self._running_services[service_id][p] = WorkerInfo(worker_id, started_event)

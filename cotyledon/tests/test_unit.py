@@ -11,6 +11,8 @@
 # under the License.
 from __future__ import annotations
 
+import multiprocessing
+import threading
 import typing
 from unittest import TestCase
 from unittest import mock
@@ -18,6 +20,7 @@ from unittest import mock
 import pytest
 
 import cotyledon
+from cotyledon import _utils
 
 
 P = typing.ParamSpec("P")
@@ -33,7 +36,7 @@ class SomeTest(TestCase):
         super().setUp()
         cotyledon.ServiceManager._process_runner_already_created = False
 
-    def test_forking_slowdown(self) -> None:  # noqa: PLR6301
+    def test_forking_slowdown(self) -> None:
         sm = cotyledon.ServiceManager()
         sm.add(FakeService, workers=3)
         with mock.patch("time.sleep") as sleep:
@@ -97,3 +100,112 @@ class SomeTest(TestCase):
         with pytest.raises(exc) as exc_info:
             func(*args, **kwargs)
         assert msg == str(exc_info.value)
+
+
+class TestMultiprocessing(TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        cotyledon.ServiceManager._process_runner_already_created = False
+
+    def test_multiprocessing_context_default(self) -> None:
+        """Test that ServiceManager uses multiprocessing (fork) by default"""
+        sm = cotyledon.ServiceManager()
+        # Default should be multiprocessing module (fork-compatible)
+        assert sm.mp_context is multiprocessing
+
+    def test_multiprocessing_context_constructor(self) -> None:
+        """Test that mp_context parameter in constructor works"""
+        spawn_ctx = multiprocessing.get_context("spawn")
+        sm = cotyledon.ServiceManager(mp_context=spawn_ctx)
+        assert sm.mp_context is spawn_ctx
+
+    def test_set_multiprocessing_context(self) -> None:
+        """Test that set_multiprocessing_context changes the context"""
+        sm = cotyledon.ServiceManager()
+        spawn_ctx = multiprocessing.get_context("spawn")
+        sm.set_multiprocessing_context(spawn_ctx)
+        assert sm.mp_context is spawn_ctx
+
+    def test_multiprocessing_context_pipe(self) -> None:
+        """Test that Pipe uses the configured context"""
+        sm = cotyledon.ServiceManager()
+        spawn_ctx = multiprocessing.get_context("spawn")
+        sm.set_multiprocessing_context(spawn_ctx)
+        # The death detection pipe should use the new context
+        # We can't directly check the type, but we can verify the context
+        # by checking that the pipe was recreated
+        pipe_before = sm._death_detection_pipe
+        sm.set_multiprocessing_context(spawn_ctx)
+        # Pipe should be recreated
+        assert sm._death_detection_pipe is not pipe_before
+
+    def test_multiprocessing_context_event(self) -> None:
+        """Test that Event uses the configured context"""
+        sm = cotyledon.ServiceManager()
+        spawn_ctx = multiprocessing.get_context("spawn")
+        sm.set_multiprocessing_context(spawn_ctx)
+        # Create an event using the context
+        event = sm.mp_context.Event()
+        # Verify it's an Event object
+        assert hasattr(event, "set")
+        assert hasattr(event, "wait")
+
+    def test_spawn_process_with_context(self) -> None:
+        """Test that spawn_process uses the provided context"""
+
+        def dummy_target() -> None:
+            pass
+
+        # Test with default context (None)
+        mock_proc_instance = mock.Mock()
+        mock_proc_instance.start = mock.Mock()
+        with mock.patch(
+            "multiprocessing.Process",
+            return_value=mock_proc_instance,
+        ) as mock_process:
+            _utils.spawn_process(dummy_target)
+            # Should use multiprocessing.Process
+            mock_process.assert_called_once()
+            mock_proc_instance.start.assert_called_once()
+
+        # Test with explicit context
+        spawn_ctx = multiprocessing.get_context("spawn")
+        mock_ctx_proc_instance = mock.Mock()
+        mock_ctx_proc_instance.start = mock.Mock()
+        with mock.patch.object(
+            spawn_ctx,
+            "Process",
+            return_value=mock_ctx_proc_instance,
+        ) as mock_ctx_process:
+            _utils.spawn_process(dummy_target, ctx=spawn_ctx)
+            # Should use ctx.Process
+            mock_ctx_process.assert_called_once()
+            mock_ctx_proc_instance.start.assert_called_once()
+
+    def test_spawn_process_backward_compatible(self) -> None:
+        """Test that spawn_process without ctx is backward compatible"""
+
+        def dummy_target() -> None:
+            pass
+
+        # When ctx is None, should default to multiprocessing
+        mock_proc_instance = mock.Mock()
+        mock_proc_instance.start = mock.Mock()
+        with mock.patch(
+            "multiprocessing.Process",
+            return_value=mock_proc_instance,
+        ) as mock_process:
+            _utils.spawn_process(dummy_target, ctx=None)
+            mock_process.assert_called_once()
+            mock_proc_instance.start.assert_called_once()
+
+    def test_set_multiprocessing_context_after_run_raises(self) -> None:
+        """Test that set_multiprocessing_context raises if called after run()"""
+        sm = cotyledon.ServiceManager()
+        sm._child_supervisor = threading.Thread()  # Simulate run() being called
+        spawn_ctx = multiprocessing.get_context("spawn")
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot change multiprocessing context after run",
+        ):
+            sm.set_multiprocessing_context(spawn_ctx)

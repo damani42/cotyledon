@@ -53,8 +53,10 @@ R = typing.TypeVar("R")
 def spawn(
     target: typing.Callable[P, R],
     *args: P.args,
+    ctx: multiprocessing.context.BaseContext | None = None,
     **kwargs: P.kwargs,
 ) -> threading.Thread:
+    # ctx is not used for threads, but kept for API consistency
     t = threading.Thread(target=target, args=args, kwargs=kwargs)
     t.daemon = True
     t.start()
@@ -79,9 +81,12 @@ def check_callable(
 def spawn_process(
     target: typing.Callable[P, R],
     *args: P.args,
+    ctx: multiprocessing.context.BaseContext | None = None,
     **kwargs: P.kwargs,
 ) -> multiprocessing.Process:
-    p = multiprocessing.Process(
+    if ctx is None:
+        ctx = multiprocessing  # backward compatible (fork)
+    p = ctx.Process(
         target=target,
         args=args,
         kwargs=kwargs,
